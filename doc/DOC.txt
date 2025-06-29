@@ -1,0 +1,31 @@
+RMI observation pre-processor
+=============================
+Alex Deckmyn, RMI
+2018-03-07
+
+This set of python code will scan the incoming GTS BUFR-SYNOP data
+and prepare a final BUFR file for surface Data Assimilation.
+
+requirements: python3, eccodes (numpy)
+
+METHODOLOGY
+
+- files that are received from GTS are in hourly directories (at RMI)
+- every 15' the recent files are parsed to index all observations
+- A GTS file should (I think) have 1 BUFR message. But that may consist of many subsets.
+- All subsets are indexed in a table (data base). The most important fields for retrieving are filename (where is the data) and subsetNumber (find data in the file). For indexing, we use all GTS labels plus stationNumber.
+- If a correction is found for some data (which may be only a subset of the original BUFR), the retrieval fields are modified.
+- To know which version has priority, we compare the GTS tags. e.g. CCx has priority.
+- If two files have identical GTS tags, we suppose they are identical (i.e. duplication). No action is taken.
+- At the time of Data Assimilation, we go through the data table: read all selected (sub-)messages from the original files and export all to a single BUFR file. 
+
+- we build a data table for every DA time (e.g. every 6 hours). These are separate SQLite files that can be archived for a few days (after 6 days the GTS data is no longer available anyway).
+- even after "DA-time" we might update some data tables, because GTS data can be delayed. Whether a posteriori updating is useful remains to be seen.
+
+- the SQLite file contains a main table with obs references, but also some meta-data: cycle time, time window (min/max datetime), latest update time (e.g. every 15'), last subdirectory visited, ... so when you update you e.g. never need to check GTS directories older than the last visited one. 
+
+- if extracting on the fly is too slow (thousands of BUFR's), we could do that in every cycle: to a temporary file or as a blob in the SQLite data base. But using the original files from GTS is cleaner.
+
+- We could do some data checking as well. Since we only want T2m & RH2m, we can check for "normal" values of these. And remove the message from the index if it doesn't contain useful observations for CANARI (or SODA).
+
+

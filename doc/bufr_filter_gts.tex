@@ -1,0 +1,115 @@
+\documentclass[10pt]{article}
+\usepackage[dvips]{color}
+\usepackage{graphicx} 
+\begin{document}
+
+\begin{titlepage}
+  \title{
+    pop-rmi : Python Observation Parser
+   }
+\author{Alex Deckmyn}
+  \maketitle
+\abstract{ A progressive document describing work on GTS observation parsing and extraction at RMI.
+\newline
+ \textbf{WORK IN PROGRESS} }
+
+\end{titlepage}
+%\tableofcontents
+%\newpage
+\section{Introduction}
+\texttt{pop\_rmi} is a python module for pre-processing of GTS SYNOP data. It uses \texttt{ecCodes} from ECMWF for readinb BUFR (and GTS header).
+
+\begin{itemize}
+\item Data is kept in situ: we don't move or copy BUFR files until the moment of Data Assimilation.
+\item All incoming GTS files are parsed. The (sub)messages are listed with the necessary meta-data in a SQLite data base.
+\item This data table is kept up-to-date by e.g. replacing rows if there is a correction.
+\item When we need a final BUFR file for data assimilation, all the BUFR sets listed in the data table are extracted from the original location and written to a single large BUFR file.
+\end{itemize}
+
+The implementation needs to handle a number of possibilities:
+\begin{itemize}
+\item corrupted GTS header: if ecCodes can not decode the GTS header, a file is not processed further, even if it contains valid BUFR data. There seem to be particular classes of data that are not identified correctly by ecCodes. Currently they are skipped, but it does look more like a systematic difference rather than an error. Even the file names are a bit different from standard. \textbf{It turns out this is local IRM data that has not passed via GTS. Therefore the header does not include a transmission sequence number and ecCodes considers it non-conform.}
+\item Empty files with only GTS headers. Sometimes a file contains only the GTS headers a no actual data.
+\item corrupted (or more general unreadable) BUFR data. If ecCodes can not decode the BUFR messages, the whole file is skipped.
+\item We assume a GTS file contains only one single BUFR message. But this may be composed of many subsections (e.g. a BUFR file may contain a separate subsection for every synop station of a country or region). We make data base entries for all subsections, because later corrections may appear for only some of them, so we need to address them separately. 
+\item Data corrections. If a later GTS message contains corrections to a previous message, or to some subsections, entries in the SQLite database must be adapted. If the message is a duplication rather than a correction, it is not further processed. However, sometimes this is not clear. Some centres seem to send out files with the same GTS headers but containing data for different synop stations. This is not strictly correct (according to WMO no two messages should have the same GTS headers: the second should be marked as an addition or ammendment...).
+\item Currently, I only use station ID (blockNumber and stationNumber) to distinguish land stations, and similar codes for ships, buoys, moving stations... So if two files with identical GTS headers contain data for the same synop station, the second is always assumed a duplicate and not processed further.
+\end{itemize}
+
+
+\section{Incoming data}
+For surface data assimilation, we need synop observations from the GTS network.
+Most of this data has now been ported to the BUFR format, so we only consider that format for DA.
+
+We receive the GTS data in real-time on \texttt{/mnt/afd\_shelf/observations/bufrsynop}. There are subdirectories \texttt{YYYYMMDDHH} that contain all files received in that hour. \textbf{Note that some of these files still refer to older times!} This means that if you need all observations for a particular time window, you must also search in later GTS subdirectories for files that refer to your time window.
+
+Every hourly subdirectory contains in the order of 3000 files. So if you have a 6h observation window, you may need to consider 18000 files or more. Some of these contains 10 or more subsections. On the other hand, quite a few are corrections and addtions to previous messages. And a significant number of files contain no useful data (empty or correpted).
+
+\subsection{GTS header overview}
+In general, file names (and GTS tags) are of the form \textbf{$T_1T_2A_1A_2II\_CCCC\_YYYYMMDDHHMM$[\_BBB]} where the timestamp is an extension of the GTS tag ('YYGGgg' or in my notation 'DDHHMM').
+
+\begin{itemize}
+\item $T_1T_2 = IS$ stands for synop data in BUFR format.
+\item $A_1$ is a type indicator (main synoptic obs, intermediate, fixed or mobile station etc.) We consider all subtypes.
+\item $A_2$ indicates the region (table C3 in GTS reference). We are most interested in A (northern hemisphere, -90 -- 0) and D (0 -- +90) or N (northern hemisphere). X is global. But especially I,J,K,L,S are not interesting.
+%A 0° – 90°W northern hemisphere
+%B 90°W –180° northern hemisphere 
+%C 180° – 90°E northern hemisphere 
+%D 90°E – 0° northern hemisphere 
+%E 0° – 90°W tropical belt 
+%F 90°W – 180° tropical belt 
+%G 180° – 90°E tropical belt 
+%H 90°E – 0° tropical belt 
+%N Northern hemisphere
+%I 0° – 90°W southern hemisphere
+%J 90°W – 180° southern hemisphere
+%K 180° – 90°E southern hemisphere
+%L 90°E – 0° southern hemisphere
+%S Southern hemisphere
+%T 45°W – 180° northern hemisphere
+%X Global area (area not definable)
+\item $II$ I don't know these yet. 
+\end{itemize}
+
+We assume that all GTS files contain only one BUFR message, but this may consist of many subsections. It seems valid to assume that in most cases (?) the subsections refer to different synop stations. Thus we always parse the subsections to identify all stations separately.
+
+The BBB tag can be absent (original message), 'RRX' (X=A, B,...) for additional date, 'CCX' for corrections and 'AAX' for amendments. I have no idea what an amendment means. I deal with CCx tags in the following way. If two messages with the same GTS headers and SID are found, the BBB tag decides which gets precedence: missing (or lower X) gets replaced by a later correction. If neither is a correction (or both have the same X), I just keep the first that I found. I don't know what else I should do... this should not happen, I think, so when it does, I just assume it is a duplication. Sometimes that assumption is certainly correct. Not sure in general...
+
+
+Some particular cases from looking at a very limited number of days:
+\begin{itemize}
+\item ISMA40\_C\_CCCC\_YYYYMMDDHHSS files (and also ISIA40\_C\_...) appear to be different from ordinary GTS files. The file name is not conform to the rules ('\_C\_'), and ecCodes can not decode the GTS header (\texttt{gts\_ls} or python API both tried). That appears to be because some control characters (line feed etc.) are missing at the beginning of the file. But the BUFR message itself is intact. So what should I do? As the area indicator ($A_2 =  A$) indicates this could be interesting for us. Currently all these messages are discarded.
+\item in case of GTS header problems, it is mostly that there is no line with transmission sequence number (a 3-digit number) on the line before the GTS headers. This is e.g. the case with all local data from IRM (CCCC='EBUM', 'EBBR', 'ELLX'). In this case, the GTS headers are parsed from the file name.
+\item Some GTS files have identical headers, but do not contain the same date. For instance, some centres seem to send out all synop stations as separate GTS files but with identical headers. I solve this (?) by always looking at the BUFR station ID as well.
+\item Some files cause other problems with ecCodes. For instance, ISND02\_LLBD\_... has ''WIGOS'' data. I am not entirely sure how the station identification should be done, and also ecCodes crashes violently when trying to extract subsections. Reading parameters for every subsection via \texttt{\#n\#someKey} works fine, but \texttt{/subSection=n/someKey} does not. Also \texttt{codes\_set(msg, 'doExtractSubsets', 1)} crashes. So currently, I can not extract these files as separate messages. As 'LLBD' signifies Israel, this is not really a problem for Data Assimilation in Belgium.
+\item There are a lot of 'additional' messages (RRx) that do not seem to be taken into account. A great number are from \textbf{EGGR} (Bracknell). This needs further study. Often they come many hours (up to 24)  later, so for Data Assimilation in real-time they are of no consequence.
+\end{itemize}
+
+\section{Data base structure}
+We assume the data base is a SQLite file (valid for a particular time window). It could of course be a different data base (e.g. server based). That would be more performant and more scalable (SQLite is problematic if different processes write data to the same file). But in the present contaxt, that is not really an issue (yet).
+
+The database has the following fields:\\
+TT, AA, II, CCCC, timestamp (date/time from GTS header extended to full date format), SID (station ID), filename (the full path to the GTS message), subset (the subsection where the message for that SID resides).
+
+SID is either a concatenation of blockNumber and stationNumber (forming a string of 5 characters) or an alphanumeric string identifying a ship, buoy or mobile station.
+
+\section{The code}
+All code is in python, using ecCodes via the API provided by ECMWF. This should be easily portable.
+On bofur, it takes about 7 minutes to parse all GTS directories and build a database of around 15000 messages. Extracting these to a single BUFR message again takes about 7 minutes.
+
+The first part (parsing the GTS directories) could be done as an hourly (cron) job, so at the time of assimilation only the most recent directory remains to be parsed.
+
+However, the writing to BUFR can not be done in the same way, because more recent data may actually need to replace previous BUFR messages. On the other hand, this code could be run faster by parallellising it a bit. Various sub-processes could write separate BUFR files that are then simply stuck together.
+
+\section{TO DO}
+\begin{itemize}
+\item validate
+\item I \emph{think} dealing with 'corrections' ('CCX') is OK, but I have no idea about \textbf{amendments ('AAX')}. Also dealing with 'additional' messages ('RRX') is something I didn't really look into. Currently, such messages are only included if they concern different stations, but what if such an 'addition' has extra observations for stations that are already in the list? Does this happen? I don't know.
+\item find some clean way to keep track of which files have been parsed. Now, I only do this at a directory level. So when scanning at a frequency less than 1 hour, I would scan the same directory several times. Rather inefficient...
+\item find particlar case where messages are missed
+\item Additional quality checks and filtering: latitude/longitude in BUFR messages, timestamp read from the BUFR file (not only the GTS header). Maybe even some quick sanity ckeck on e.g. T2m.
+\item 3D-var: also TEMP, AMDAR. That will be for after I get surface assimilation fully functioning.
+\item Radar \& satellite data: this is where we finally are heading to. But it will need more manpower.
+\end{itemize}
+
+\end{document}
